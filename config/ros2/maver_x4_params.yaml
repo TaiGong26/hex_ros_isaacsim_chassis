@@ -1,0 +1,20 @@
+/**/hex_ros_isaacsim_maver_x4:
+  ros__parameters:
+    # main loop rate [hz] — torque publish rate to the bridge
+    ctrl_rate: 1000.0
+
+    # chs_state forward rate [hz]
+    rate_state: 500.0
+
+    # frame id used in the forwarded state header
+    robot_frame_id: "base_link"
+
+    # robot type: 30 = X4H1 (kept for interface compat, unused in bridge mode)
+    robot_type: 30
+
+    # bridge topics (all bridge topics the deliverable subscribes to are params)
+    bridge_state_topic: "/joint_states"
+    bridge_cmd_topic: "/hex_chs_cmd"
+
+    # forwarded header time source: "sim" (bridge stamp) | "ros" (now)
+    time_source: "sim"
