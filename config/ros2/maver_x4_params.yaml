@@ -3,6 +3,6 @@
     # Fixed command forwarding rate in Hz.
     ctrl_rate: 1000.0
     # Isaac Sim publishes /clock; the node follows simulation time.
-    use_sim_time: false
+    use_sim_time: true
     joint_command_topic: "/joint_command"
     joint_state_topic: "/joint_states"

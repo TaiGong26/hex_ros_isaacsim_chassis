@@ -1,9 +1,11 @@
-"""ROS 2 interface for the Isaac Sim X4 forwarder.
-
-Copyright 2026 Dong Zhaorui. All rights reserved.
-Author: Dong Zhaorui 847235539@qq.com
-Date: 2026-08-31
-"""
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+################################################################
+# Copyright 2026 Dong Zhaorui. All rights reserved.
+# Author: taigong26 thetaigon@qq.com
+# Date  : 2026-08-31
+################################################################
+"""Provide the ROS 2 interface for the Isaac Sim Maver X4 bridge."""
 
 import threading
 
@@ -23,13 +25,24 @@ from .interface_base import ChassisInterfaceBase
 
 
 class DataInterface(ChassisInterfaceBase):
-    """Provide ROS transport while leaving control logic to the robot node."""
+    """Provide ROS 2 transport services for the Maver X4 bridge.
+
+    ROS callbacks run in a dedicated spin thread.  The chassis node reads
+    control commands and cached joint positions from its control thread.
+    """
 
     def __init__(self, name: str = "unknown") -> None:
+        """Initialize ROS 2 publishers, subscribers, and the spin thread.
+
+        Args:
+            name: ROS 2 node name.
+
+        """
         rclpy.init()
         self.__node = rclpy.node.Node(
             name, automatically_declare_parameters_from_overrides=True)
         self._logger = self.__node.get_logger()
+        # Prevent repeated shutdown calls from destroying ROS resources twice.
         self._shutting_down = False
         super().__init__(name)
 
@@ -57,15 +70,20 @@ class DataInterface(ChassisInterfaceBase):
         self.__spin_thread.start()
 
     def sleep(self) -> None:
-        """Sleep according to the ROS clock."""
+        """Sleep for one configured control period."""
         self.__rate.sleep()
 
     def ok(self) -> bool:
-        """Return whether ROS is active."""
+        """Return whether the ROS 2 context is still active.
+
+        Returns:
+            ``True`` while the ROS 2 context is running.
+
+        """
         return rclpy.ok()
 
     def shutdown(self) -> None:
-        """Destroy the node and stop the ROS context."""
+        """Destroy ROS resources and stop the spin thread."""
         if self._shutting_down:
             return
         self._shutting_down = True
@@ -75,7 +93,7 @@ class DataInterface(ChassisInterfaceBase):
         self.__spin_thread.join(timeout=1.0)
 
     def __spin(self) -> None:
-        """Spin the ROS node until shutdown."""
+        """Process ROS callbacks until the context is shut down."""
         try:
             rclpy.spin(self.__node)
         except rclpy.executors.ExternalShutdownException:
@@ -101,19 +119,45 @@ class DataInterface(ChassisInterfaceBase):
         self._logger.debug(msg, *args, **kwargs)
 
     def pub_joint_command(self, names, velocity, effort, position=None) -> None:
-        """Publish Isaac actuator targets and feed-forward effort."""
+        """Publish canonical joint targets in the current Bridge order.
+
+        Args:
+            names: Bridge joint names defining the output order.
+            velocity: Eight canonical joint velocity targets.
+            effort: Eight canonical effort feed-forward values.
+            position: Optional eight canonical joint position targets.
+
+        """
+        bridge_velocity = self.to_bridge_order(velocity, names)
+        bridge_effort = self.to_bridge_order(effort, names)
+        bridge_position = (self.to_bridge_order(position, names)
+                           if position is not None else None)
+        if (bridge_velocity is None or bridge_effort is None
+                or (position is not None and bridge_position is None)):
+            self.logw("Maver command mapping is unavailable; command dropped")
+            return
+
+        # Publish arrays only after all three fields share one name mapping.
         msg = JointState()
         msg.header.stamp = self.__node.get_clock().now().to_msg()
         msg.name = list(names)
-        msg.velocity = np.asarray(velocity, dtype=np.float64).tolist()
-        msg.effort = np.asarray(effort, dtype=np.float64).tolist()
-        if position is not None:
-            msg.position = np.asarray(position, dtype=np.float64).tolist()
+        msg.velocity = bridge_velocity.tolist()
+        msg.effort = bridge_effort.tolist()
+        if bridge_position is not None:
+            msg.position = bridge_position.tolist()
         self.__command_pub.publish(msg)
 
     @staticmethod
     def __jnt_to_dc(jnt: HexRosJnt) -> HexDcBaseJntFull:
-        """Convert a ROS joint command to the shared dataclass."""
+        """Convert a ROS joint command into the shared dataclass.
+
+        Args:
+            jnt: ROS joint command fields.
+
+        Returns:
+            A NumPy-backed shared joint-command structure.
+
+        """
         return HexDcBaseJntFull(
             pos=np.asarray(jnt.pos, dtype=np.float64),
             vel=np.asarray(jnt.vel, dtype=np.float64),
@@ -124,7 +168,12 @@ class DataInterface(ChassisInterfaceBase):
             lim_acc=np.asarray(jnt.lim_acc, dtype=np.float64))
 
     def __ctrl_callback(self, msg: HexRosRoboChsCtrlStamped) -> None:
-        """Queue an incoming chassis command."""
+        """Convert and queue an incoming chassis command.
+
+        Args:
+            msg: ROS 2 chassis control message.
+
+        """
         ctrl = msg.chs_ctrl
         self.logd(f"received chassis control: {ctrl.ctrl_mode}")
         self._chs_ctrl_deque.append(HexDcRoboChsCtrlStamped(
@@ -143,5 +192,10 @@ class DataInterface(ChassisInterfaceBase):
                         z=ctrl.vel.angular.z)))))
 
     def __joint_state_callback(self, msg: JointState) -> None:
-        """Capture bridge names and update the latest positions."""
+        """Cache the latest Bridge joint names and positions.
+
+        Args:
+            msg: Joint state message published by Isaac Sim.
+
+        """
         self.set_joint_state(msg.name, msg.position)

@@ -1,9 +1,11 @@
-"""Transport abstraction for the Isaac Sim A3 forwarder.
-
-Copyright 2026 Dong Zhaorui. All rights reserved.
-Author: Dong Zhaorui 847235539@qq.com
-Date: 2026-08-31
-"""
+#!/usr/bin/env python3
+# -*- coding:utf-8 -*-
+################################################################
+# Copyright 2026 Dong Zhaorui. All rights reserved.
+# Author: taigong26 thetaigon@qq.com
+# Date  : 2026-08-31
+################################################################
+"""Define the transport abstraction for the Isaac Sim Trigger A3 bridge."""
 
 from abc import ABC, abstractmethod
 from collections import deque
@@ -13,30 +15,44 @@ import numpy as np
 
 
 class ChassisInterfaceBase(ABC):
-    """Define the ROS-independent interface used by the A3 node."""
+    """Define ROS-independent transport services for the Trigger A3 node.
+
+    The concrete ROS implementation owns subscriptions and callback
+    processing, while the control node consumes commands from its loop.
+    """
 
     def __init__(self, name: str = "unknown") -> None:
+        """Initialize the transport state.
+
+        Args:
+            name: Logical name used by the concrete transport implementation.
+
+        """
         self._name = name
         self._rate_param = {}
         self._chs_ctrl_deque = deque(maxlen=100)
-        # self._joint_names = []
 
     def get_rate_param(self) -> dict:
-        """Return control rate parameters."""
+        """Return the configured control-rate parameters.
+
+        Returns:
+            A dictionary containing transport-specific rate values.
+
+        """
         return self._rate_param
-
-    # def set_joint_names(self, names: list) -> None:
-    #     """Store the first bridge joint-name frame without reordering it."""
-    #     if not self._joint_names and names:
-    #         self._joint_names = list(names)
-
-    # def get_joint_names(self) -> list:
-    #     """Return bridge joint names in their original order."""
-    #     return list(self._joint_names)
 
     @staticmethod
     def deque_helper(dq: deque, latest: bool = False) -> Optional[Any]:
-        """Pop one command, optionally discarding older commands."""
+        """Retrieve one queued item using the requested queue policy.
+
+        Args:
+            dq: Queue from which to retrieve an item.
+            latest: If true, discard older items and return the newest item.
+
+        Returns:
+            The selected item, or ``None`` when the queue is empty.
+
+        """
         if not dq:
             return None
         if latest:
@@ -46,7 +62,15 @@ class ChassisInterfaceBase(ABC):
         return dq.popleft()
 
     def get_chs_ctrl(self, latest: bool = False):
-        """Return a queued chassis command."""
+        """Return one queued chassis command.
+
+        Args:
+            latest: Whether to discard stale commands and return the newest.
+
+        Returns:
+            A chassis control message, or ``None`` if no command is queued.
+
+        """
         return self.deque_helper(self._chs_ctrl_deque, latest)
 
     @abstractmethod
@@ -87,5 +111,12 @@ class ChassisInterfaceBase(ABC):
     @abstractmethod
     def pub_joint_command(self, names: list, velocity: np.ndarray,
                           effort: np.ndarray) -> None:
-        """Publish one complete bridge joint command."""
+        """Publish one complete Isaac Sim joint command.
+
+        Args:
+            names: Joint names defining the array order.
+            velocity: Joint velocity targets in Bridge order.
+            effort: Joint effort feed-forward values.
+
+        """
         raise NotImplementedError

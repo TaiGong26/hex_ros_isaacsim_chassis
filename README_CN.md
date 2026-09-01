@@ -1,4 +1,4 @@
-# hex_ros_robot_chassis
+# hex_ros_isaacsim_chassis
 **中文** | [English](README.md)
 
 ## 目录
@@ -10,197 +10,146 @@
 - [5. 参数说明](#5-参数说明)
 - [6. 依赖关系](#6-依赖关系)
 - [7. 快速使用](#7-快速使用)
+- [8. 常见问题](#8-常见问题)
 
 ---
 
 ## 1. 包的简介
 
-这是 **HEXFELLOW** 底盘的 **ROS 驱动包**。
+`hex_ros_isaacsim_chassis` 是 Isaac Sim 底盘的 ROS 2 Bridge 转发包。
 
-- **Trigger A3 LR1** 是一款三轮全向底盘，配备三个全向轮，实现平面内三自由度运动（前后、左右、旋转）。
-- **Trigger A3 H1** 是与 **Trigger A3 LR1** 同底盘的 3 电机变体，区别在于电机不同：H1 支持真 **MIT 阻抗控制**，而 LR1 的 `MIT` 语义是"目标速度 + 最大限制电流"。
-- **Maver** 是一款四轮转向底盘，配备 8 个电机（4 个转向关节 `joint_yaw1` ~ `joint_yaw4` + 4 个驱动关节 `joint_wheel1` ~ `joint_wheel4`），支持两种硬件变体：**X4H1**（`robot_type=30`）与 **L4H1**（`robot_type=31`）。
+本包负责：
 
-> A3 底盘（LR1 / H1）三个驱动关节统一命名为 `joint_1` ~ `joint_3`，与 [hex_ros_urdf_trigger_a](https://github.com/hexfellow/hex_ros_urdf_trigger_a) 的 URDF 及 [hex_ros_sim_trigger_a](https://github.com/hexfellow/hex_ros_sim_trigger_a) 仿真一致。
+- 订阅上游发布的 `chs_ctrl` 底盘控制指令；
+- 订阅 Isaac Sim Bridge 发布的底盘 `JointState`；
+- 将支持的底盘控制指令转发为 Isaac Sim Bridge 使用的 `JointState` 命令；
+- 通过参数指定状态话题和命令话题。
 
-本包通过 WebSocket 连接底盘控制器，将 ROS 控制指令转发给硬件，并发布底盘实时状态、里程计、关节状态和 TF 变换。
-支持 **ROS 1** 和 **ROS 2**。
+本包包含以下节点：
 
+- **Maver X4**：四轮转向底盘；
+- **Trigger A3**：三轮底盘。
 
+本包不负责发布 `joint_state`、`odom` 或 `/tf`。这些话题由 Isaac Sim 场景提供，不属于本包的发布接口。
 
 ---
 
 ## 2. 包架构
 
-```
-hex_ros_robot_chassis/
-├── config/                              # 参数配置
-│   ├── ros1/
-│   │   ├── trigger_a3_lr1_params.yaml   #   A3 LR1 ROS 1 参数
-│   │   ├── trigger_a3_h1_params.yaml    #   A3 H1 ROS 1 参数
-│   │   ├── maver_params.yaml            #   Maver ROS 1 参数
-│   │   └── display_maver_x4.rviz        #   Maver ROS 1 rviz 配置
-│   └── ros2/
-│       ├── trigger_a3_lr1_params.yaml   #   A3 LR1 ROS 2 参数
-│       ├── trigger_a3_h1_params.yaml    #   A3 H1 ROS 2 参数
-│       ├── maver_params.yaml            #   Maver ROS 2 参数
-│       └── display_maver_x4.rviz        #   Maver ROS 2 rviz 配置
-├── launch/                              # 启动文件
-│   ├── ros1/
-│   │   ├── trigger_a3_lr1.launch        #   A3 LR1 ROS 1 启动
-│   │   ├── trigger_a3_h1.launch         #   A3 H1 ROS 1 启动（含 rviz，供 demo include）
-│   │   └── maver.launch                 #   Maver ROS 1 启动（含 rviz）
-│   └── ros2/
-│       ├── trigger_a3_lr1.launch.py     #   A3 LR1 ROS 2 启动
-│       ├── trigger_a3_h1.launch.py      #   A3 H1 ROS 2 启动（含 rviz，供 demo include）
-│       └── maver.launch.py              #   Maver ROS 2 启动（含 rviz）
-├── hex_ros_robot_chassis/               # 核心代码
-│   ├── robot_trigger_a3_lr1.py          #   A3 LR1 主节点（控制循环 + ROS 接口）
-│   ├── robot_trigger_a3_h1.py           #   A3 H1 主节点（控制循环 + ROS 接口，MIT 阻抗）
-│   ├── robot_maver.py                   #   Maver 主节点（控制循环 + ROS 接口）
-│   ├── utility/                         #   Trigger A3 LR1 / H1 共用的 DataInterface
-│   │   ├── __init__.py                  #     根据 ROS_VERSION 自动选择 ROS1/ROS2 实现
-│   │   ├── interface_base.py            #     抽象基类 ChassisInterfaceBase
-│   │   ├── ros1_interface.py            #     ROS 1 DataInterface 实现
-│   │   └── ros2_interface.py            #     ROS 2 DataInterface 实现
-│   └── maver_util/                      #   Maver 的 DataInterface（与 utility/ 同构）
-│       ├── __init__.py                  #     根据 ROS_VERSION 自动选择 ROS1/ROS2 实现
-│       ├── interface_base.py            #     抽象基类 ChassisInterfaceBase
-│       ├── ros1_interface.py            #     ROS 1 DataInterface 实现
-│       └── ros2_interface.py            #     ROS 2 DataInterface 实现
-├── resource/                            # ament 资源文件
-├── setup.py                             # Python 打包配置（3 个 entry_point）
-├── setup.cfg                            # Python 打包配置
-├── package.xml                          # ROS 包清单（双系统条件依赖）
-└── README.md                            # 英文文档
+```text
+hex_ros_isaacsim_chassis/
+├── config/ros2/
+│   ├── maver_x4_params.yaml
+│   └── trigger_a3_params.yaml
+├── launch/ros2/
+│   ├── isaacsim_maver_x4.launch.py
+│   └── isaacsim_trigger_a3.launch.py
+├── hex_ros_isaacsim_chassis/
+│   ├── isaacsim_maver_x4.py
+│   ├── isaacsim_trigger_a3.py
+│   ├── maver_util/
+│   └── utility/
+├── package.xml
+├── setup.py
+└── README_CN.md
 ```
 
-### 接口层说明
+### 节点入口
 
-`utility/`（Trigger A3 LR1 / H1）与 `maver_util/`（Maver）模块各提供统一的 `DataInterface`，根据 `ROS_VERSION` 环境变量自动选择 ROS 1 或 ROS 2 实现：
-
-| 实现 | 文件 | 适用版本 |
-|------|------|---------|
-| `ros1_interface.DataInterface` | `ros1_interface.py` | ROS 1（Noetic） |
-| `ros2_interface.DataInterface` | `ros2_interface.py` | ROS 2（Humble / Foxy） |
-
-> `maver_util/` 结构与 `utility/` 相同，为 Maver 专用接口层（多了 `robot_type` 参数读取）。A3 LR1 与 A3 H1 均复用 `utility/`（A3 H1 机型固定，无需 `robot_type`）。
+| 节点 | 可执行文件 | 作用 |
+|---|---|---|
+| Maver X4 | `isaacsim_maver_x4` | 转发 Maver X4 底盘控制指令 |
+| Trigger A3 | `isaacsim_trigger_a3` | 转发 Trigger A3 底盘控制指令 |
 
 ---
 
 ## 3. 话题接口
 
-### Trigger A3 LR1
+### 控制输入
 
 | 方向 | 话题 | 类型 | 说明 |
-|------|------|------|------|
-| 订阅 | `chs_ctrl` | `hex_ros_msgs/(msg/)HexRosRoboChsCtrlStamped` | 底盘控制指令（VEL / MIT 模式） |
-| 发布 | `chs_state` | `hex_ros_msgs/(msg/)HexRosRoboChsStateStamped` | 底盘状态反馈（3 个轮子的位置、速度、力矩） |
-| 发布 | `odom` | `nav_msgs/(msg/)Odometry` | 里程计（位置 x, y, yaw + 速度 vx, vy, omega） |
-| 发布 | `joint_states` | `sensor_msgs/(msg/)JointState` | 3 个轮关节状态（`joint_1` ~ `joint_3`） |
-| 发布 | `/tf` | `tf2_msgs/(msg/)TFMessage` | odom → base_link 坐标系变换 |
+|---|---|---|---|
+| 订阅 | `chs_ctrl` | `hex_ros_msgs/msg/HexRosRoboChsCtrlStamped` | 上游底盘控制指令 |
 
-### Trigger A3 H1
+### Isaac Sim Bridge 接口
 
-| 方向 | 话题 | 类型 | 说明 |
-|------|------|------|------|
-| 订阅 | `chs_ctrl` | `hex_ros_msgs/(msg/)HexRosRoboChsCtrlStamped` | 底盘控制指令（VEL / MIT 模式） |
-| 发布 | `chs_state` | `hex_ros_msgs/(msg/)HexRosRoboChsStateStamped` | 底盘状态反馈（3 个电机的的位置、速度、力矩） |
-| 发布 | `odom` | `nav_msgs/(msg/)Odometry` | 里程计（位置 x, y, yaw + 速度 vx, vy, omega） |
-| 发布 | `joint_states` | `sensor_msgs/(msg/)JointState` | 3 个关节状态（`joint_1` ~ `joint_3`） |
-| 发布 | `/tf` | `tf2_msgs/(msg/)TFMessage` | odom → base_link 坐标系变换 |
+| 方向 | 参数 | 默认话题 | 类型 | 说明 |
+|---|---|---|---|---|
+| 订阅 | `joint_state_topic` | `/joint_states` | `sensor_msgs/msg/JointState` | Isaac Sim Bridge 发布的关节状态 |
+| 发布 | `joint_command_topic` | `/joint_command` | `sensor_msgs/msg/JointState` | 发往 Isaac Sim Bridge 的关节命令 |
 
-> A3 LR1 与 A3 H1 发布相同的话题与关节名（`joint_1` ~ `joint_3`），区别仅在驱动电机与控制语义（见「4. 控制模式」）。
+`joint_state_topic` 和 `joint_command_topic` 都可以在对应的 YAML 参数文件中自定义。修改后，Isaac Sim Bridge 的发布/订阅话题必须与参数保持一致。
 
-### Maver
+### Maver X4 关节名称
 
-| 方向 | 话题 | 类型 | 说明 |
-|------|------|------|------|
-| 订阅 | `chs_ctrl` | `hex_ros_msgs/(msg/)HexRosRoboChsCtrlStamped` | 底盘控制指令（VEL / MIT 模式） |
-| 发布 | `chs_state` | `hex_ros_msgs/(msg/)HexRosRoboChsStateStamped` | 底盘状态反馈（8 个电机的位置、速度、力矩） |
-| 发布 | `odom` | `nav_msgs/(msg/)Odometry` | 里程计（位置 x, y, yaw + 速度 vx, vy, omega） |
-| 发布 | `joint_states` | `sensor_msgs/(msg/)JointState` | 8 个关节状态（`joint_wheel1`, `joint_yaw1`, ..., `joint_wheel4`, `joint_yaw4`） |
-| 发布 | `/tf` | `tf2_msgs/(msg/)TFMessage` | odom → base_link 坐标系变换 |
+```text
+joint_wheel1
+joint_yaw1
+joint_wheel2
+joint_yaw2
+joint_wheel3
+joint_yaw3
+joint_wheel4
+joint_yaw4
+```
 
-> **关节顺序**：Maver 的 8 个关节（数组索引 0~7）按 `joint_wheel1, joint_yaw1, joint_wheel2, joint_yaw2, joint_wheel3, joint_yaw3, joint_wheel4, joint_yaw4` 排列；其中索引 0, 2, 4, 6 为驱动（wheel）关节，索引 1, 3, 5, 7 为转向（yaw）关节。`chs_ctrl` 的 `jnt` 数组与 `joint_states` 均须遵守该顺序。
+`JointState` 的数组字段必须与同一位置的 `name` 对应。Maver 的控制数组遵循以下标准顺序：
 
-> 消息类型定义见 [hex_ros_msgs](https://github.com/hexfellow/hex_ros_msgs)
+```text
+wheel1, yaw1, wheel2, yaw2, wheel3, yaw3, wheel4, yaw4
+```
 
-> 默认提供ros时间；如果您需要硬件时间戳，可以通过`chs_state.jnt.header.stamp`获取
+### Trigger A3 关节名称
 
+```text
+joint_1
+joint_2
+joint_3
+```
 
 ---
 
 ## 4. 控制模式
 
-底盘支持两种控制模式，通过 `chs_ctrl.ctrl_mode` 选择：
+控制模式由 `chs_ctrl.ctrl_mode` 指定。
 
-| 模式 | 值 |  说明 |
-|------|-----|------|
-| `VEL` | `2` |  速度模式：下发 (vx, vy, omega) 三自由度速度指令 |
-| `MIT` | `1` | 力矩模式：语义随电机驱动而异（见下方各机型说明） |
-| `NONE` | `0` | 空操作，不执行任何控制 |
+| 模式 | 值 | 状态 | 说明 |
+|---|---:|---|---|
+| `NONE` | `0` | 支持 | 空模式，清除当前保留控制指令 |
+| `MIT` | `1` | 不支持 | 输出 warning，不发布该 MIT 控制命令 |
+| `VEL` | `2` | 支持 | 接收底盘线速度和角速度指令 |
 
-> **Trigger A3 LR1**：MIT 模式下发**目标速度 (rad/s) + 最大限制电流 (A)**，映射到 `set_chs_per_motor_spd_cmd`，并非真阻抗控制。
+Maver X4 和 Trigger A3 的 Isaac Sim Bridge 节点均不支持 MIT。收到 MIT 后不会自动转换为 VEL。
 
-> **Trigger A3 H1**：MIT 模式为**真阻抗控制**，通过 `set_chs_mit_cmd` 下发位置/速度/刚度/阻尼；当前固件强制 `kp=0`。
-
-> **Maver** 当前固件强制 `kp=0`。
-
-### MIT 模式使用警告
-
-> **MIT 模式使用警告**：除非你知道什么是 MIT 模式，否则不要使用该模式；
-
-> 使用不当可能导致底盘剧烈运动甚至损坏设备。
-
-> 确保在安全区域内运行，并随时准备急停。
+`NONE` 是空模式，不等同于发送一条零速度的 `VEL` 指令，也不等同于发送零位置或零力矩控制。它用于清除当前保留的控制指令。
 
 ---
 
 ## 5. 参数说明
 
-### Trigger A3 LR1
+### Maver X4
+
+参数文件：`config/ros2/maver_x4_params.yaml`
 
 | 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `ctrl_rate` | 1000.0 | 主控制循环频率 [Hz] |
-| `rate_state` | 500.0 | 状态发布频率（从 ctrl_rate 降采样）[Hz] |
-| `robot_host` | 192.168.1.100 | 底盘控制器 IP 地址 |
-| `robot_port` | 8439 | WebSocket 端口 |
-| `robot_frame_id` | `base_link` | 状态消息中的坐标系 |
-| `state_buffer_size` | 200 | 驱动状态缓冲区大小 |
-| `enable_kcp` | `true` | 是否启用 KCP 传输协议 |
+|---|---|---|
+| `ctrl_rate` | `1000.0` | 控制命令转发频率 [Hz] |
+| `use_sim_time` | `true` | 是否使用 ROS 仿真时间 |
+| `joint_state_topic` | `/joint_states` | 可自定义的 Bridge 状态话题 |
+| `joint_command_topic` | `/joint_command` | 可自定义的 Bridge 命令话题 |
 
-### Trigger A3 H1
+### Trigger A3
 
-| 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `ctrl_rate` | 1000.0 | 主控制循环频率 [Hz] |
-| `rate_state` | 500.0 | 状态发布频率（从 ctrl_rate 降采样）[Hz] |
-| `robot_host` | 192.168.1.100 | 底盘控制器 IP 地址 |
-| `robot_port` | 8439 | WebSocket 端口 |
-| `robot_frame_id` | `base_link` | 状态消息中的坐标系 |
-| `state_buffer_size` | 200 | 驱动状态缓冲区大小 |
-| `sens_ts` | `true` | 是否使用硬件传感器时间戳 |
-| `enable_kcp` | `true` | 是否启用 KCP 传输协议 |
-
-> A3 H1 与 LR1 参数相同（无 `robot_type`，机型固定为 H1）。
-
-### Maver 
+参数文件：`config/ros2/trigger_a3_params.yaml`
 
 | 参数 | 默认值 | 说明 |
-|------|--------|------|
-| `ctrl_rate` | 1000.0 | 主控制循环频率 [Hz] |
-| `rate_state` | 500.0 | 状态发布频率 [Hz] |
-| `robot_host` | 192.168.1.100 | 底盘控制器 IP 地址 |
-| `robot_port` | 8439 | WebSocket 端口 |
-| `robot_frame_id` | `base_link` | 状态消息中的坐标系 |
-| `state_buffer_size` | 200 | 驱动状态缓冲区大小 |
-| `sens_ts` | `true` | 是否使用硬件传感器时间戳 |
-| `enable_kcp` | `true` | 是否启用 KCP 传输协议 |
-| `robot_type` | 30 | 机型：30=X4H1，31=L4H1 |
+|---|---|---|
+| `ctrl_rate` | `1000.0` | 控制命令转发频率 [Hz] |
+| `use_sim_time` | `true` | 是否使用 ROS 仿真时间 |
+| `joint_state_topic` | `/joint_states` | 可自定义的 Bridge 状态话题 |
+| `joint_command_topic` | `/joint_command` | 可自定义的 Bridge 命令话题 |
 
-> `rate_state`（状态发布频率）默认 500.0。注：ROS2 config `config/ros2/maver_params.yaml` 中该值为 1000.0，以 500.0 为准。
+> 如果`use_sim_time`为True，你需要在isaacsim 开启 **clock** 话题
 
 ---
 
@@ -208,245 +157,164 @@ hex_ros_robot_chassis/
 
 ### Python 包
 
+本包使用 ROS 2 Python 环境和以下 Python 依赖：
+
 ```shell
-pip3 install 'hex-util-msg>=0.1.0a0'
-pip3 install 'hex-util-ros>=0.0.1a0'
-pip3 install 'hex-util-runtime>=0.0.0,<0.1.0'
-pip3 install 'hex-driver-robot>=0.1.0a4'
+pip3 install 'hex-util-msg>=0.1.0a4'
 ```
+
 
 ### ROS 包
 
-```shell
-git clone https://github.com/hexfellow/hex_ros_msgs.git
-git clone https://github.com/hexfellow/hex_ros_robot_chassis.git
-```
-
-> A3 底盘（LR1 / H1）的 rviz 可视化（launch `rviz:=true`）需要额外的 URDF 包：
-
-```shell
-git clone https://github.com/hexfellow/hex_ros_urdf_trigger_a.git
-```
-
-> Maver 的 rviz 可视化（launch `rviz:=true`）需要额外的 URDF 包：
-
-```shell
-git clone https://github.com/hexfellow/hex_ros_urdf_maver_x4.git
-```
-
----
-
-## 7. 快速使用
-
-### 1. 创建工作空间
+创建 ROS 2 工作空间并获取消息包：
 
 ```shell
 mkdir -p <your_ws>/src
 cd <your_ws>/src
-```
-
-### 2. 克隆包
-
-```shell
 git clone https://github.com/hexfellow/hex_ros_msgs.git
-git clone https://github.com/hexfellow/hex_ros_robot_chassis.git
-git clone https://github.com/hexfellow/hex_ros_urdf_trigger_a.git    # A3 底盘（LR1 / H1）
-git clone https://github.com/hexfellow/hex_ros_urdf_maver_x4.git     # Maver X4
+git clone https://github.com/hexfellow/hex_ros_isaacsim_chassis.git
 ```
 
-### 3. 编译包
+### Isaac Sim ROS 2 Bridge
 
-**ROS 1：**
+Isaac Sim 侧需要启用 ROS 2 Bridge，并创建与本包参数一致的 `JointState` 状态发布和命令订阅接口。安装和启用方式请参考 Isaac Sim 官方文档：
+
+- [Isaac Sim ROS 2 Installation](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_ros.html)
+
+---
+
+## 7. Isaacsim Action Graph
+![Action Graph](./img/80d5a0cb2d9ced03a2dc84bb76663a84.png)
+
+
+## 8. 快速使用
+
+### 1. 创建和编译工作空间
 
 ```shell
-source /opt/ros/noetic/setup.bash
+mkdir -p <your_ws>/src
+cd <your_ws>/src
+git clone https://github.com/hexfellow/hex_ros_msgs.git
+git clone https://github.com/hexfellow/hex_ros_isaacsim_chassis.git
+
 cd <your_ws>
-catkin_make
-source devel/setup.bash --extend
-```
-
-**ROS 2：**
-
-```shell
 source /opt/ros/humble/setup.bash
-cd <your_ws>
-colcon build
+colcon build --symlink-install
 source install/setup.bash --extend
 ```
 
-### 4. 使用包
+### 2. 启动节点
 
-#### ROS1
+启动 Maver X4：
+
 ```shell
-# ROS 1 — Trigger A3 LR1
-roslaunch hex_ros_robot_chassis trigger_a3_lr1.launch \
-    robot_host:=192.168.1.100 robot_port:=8439
-
-# ROS 1 — Trigger A3 H1
-roslaunch hex_ros_robot_chassis trigger_a3_h1.launch \
-    robot_host:=192.168.1.100 robot_port:=8439
-
-# ROS 1 — Maver
-roslaunch hex_ros_robot_chassis maver.launch \
-    robot_host:=192.168.1.100 robot_port:=8439
+ros2 launch hex_ros_isaacsim_chassis isaacsim_maver_x4.launch.py
 ```
 
-#### ROS2
+启动 Trigger A3：
+
 ```shell
-# ROS 2 — Trigger A3 LR1
-ros2 launch hex_ros_robot_chassis trigger_a3_lr1.launch.py \
-    robot_host:=192.168.1.100 robot_port:=8439
-
-# ROS 2 — Trigger A3 H1
-ros2 launch hex_ros_robot_chassis trigger_a3_h1.launch.py \
-    robot_host:=192.168.1.100 robot_port:=8439
-
-# ROS 2 — Maver
-ros2 launch hex_ros_robot_chassis maver.launch.py \
-    robot_host:=192.168.1.100 robot_port:=8439
-
+ros2 launch hex_ros_isaacsim_chassis isaacsim_trigger_a3.launch.py
 ```
 
+### 3. 检查接口
 
-`trigger_a3_h1.launch.py` / `maver.launch.py` 可选参数：
-- `rviz:=true/false`：是否启动 rviz 可视化（默认 `true`，A3 需要 `hex_ros_urdf_trigger_a`，Maver 需要 `hex_ros_urdf_maver_x4`）
-
-**Maver 机型选择：**
-
-Maver 有 **X4H1** 与 **L4H1** 两种机型，通过 `robot_type` 参数选择（默认 `30` = X4H1）：
-
-| 机型 | `robot_type` |
-|------|--------------|
-| X4H1 | `30` |
-| L4H1 | `31` |
-
-机型通过修改对应 ROS 版本的参数配置文件选择，然后启动：
-
-- **ROS 2**：编辑 `config/ros2/maver_params.yaml` 中的 `robot_type`，再启动 `maver.launch.py`
-- **ROS 1**：编辑 `config/ros1/maver_params.yaml` 中的 `robot_type`，再启动 `maver.launch`
-
-> 将 `robot_host` 和 `robot_port` 替换为实际底盘控制器的 IP 和端口。
-
-### 5. 控制底盘
-
-#### Trigger A3 LR1 快速使用
-
-通过 `ros2 topic pub` 可快速向底盘发送控制指令：
-
-```bash
-# VEL 模式 — 旋转 0.3 m/s
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}}}'
-
-# VEL 模式 — 停止 
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
-
-# 目标速度最大电流限制 模式 — 三个电机同速 0.3，电流限制 2.0
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [], vel: [0.3, 0.3, 0.3], eff: [2.0, 2.0, 2.0], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
-
-# 目标速度最大电流限制 模式 — 停止
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [], vel: [0.0, 0.0, 0.0], eff: [0.0, 0.0, 0.0], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
-
+```shell
+ros2 node list
+ros2 topic list -t
+ros2 topic info /chs_ctrl -v
+ros2 topic info /joint_states -v
+ros2 topic info /joint_command -v
+ros2 topic echo /joint_states --once
+ros2 topic echo /joint_command --once
 ```
 
-通过`rostopic pub`可快速向底盘发送控制指令：
+### 4. 发布控制指令
 
-```bash
-# VEL 模式 — 旋转 0.3 m/s
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}}}"
+以下示例使用 `VEL` 模式，并持续发布指令。`/chs_ctrl` 是本包固定订阅的话题；Bridge 状态和命令话题由参数指定。停止发布者后，如需清除节点保留的控制指令，请发送 `NONE`。
 
-# VEL 模式 — 停止
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
-
-# 目标速度最大电流限制模式 — 三个电机同速 0.3，电流限制 2.0
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [], vel: [0.3, 0.3, 0.3], eff: [2.0, 2.0, 2.0], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
-
-# 目标速度最大电流限制模式 — 停止
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [], vel: [0.0, 0.0, 0.0], eff: [0.0, 0.0, 0.0], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
+```shell
+# Maver: vx = 1.0 m/s
+ros2 topic pub --rate 10 /chs_ctrl \
+  hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
+  '{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 1.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
 ```
 
-> 目前**Trigger A3 lr**未支持MIT；当您使用MIT模式时，将会向****Trigger A3 lr****设备下发目标速度(rad/s)+最大限制电流(A)
-
-#### Trigger A3 H1 快速使用
-
-通过 `ros2 topic pub` 可快速向底盘发送控制指令（3 个电机按 `joint_1` ~ `joint_3` 顺序排列）：
-
-```bash
-# VEL 模式 — 旋转 0.3 m/s
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}}}'
-
-# MIT 模式 — 阻尼运动（目标速度 0.5 rad/s，阻尼 3.0，kp 当前固件强制为 0）
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0.0, 0.0, 0.0], vel: [0.5, 0.5, 0.5], eff: [0.0, 0.0, 0.0], kp: [0.0, 0.0, 0.0], kd: [3.0, 3.0, 3.0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
-
-# MIT 模式 — 松手（全零，无输出力矩）
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0, 0, 0], vel: [0, 0, 0], eff: [0, 0, 0], kp: [0, 0, 0], kd: [0, 0, 0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
+```shell
+# Maver: wz = 1.0 rad/s
+ros2 topic pub --rate 10 /chs_ctrl \
+  hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
+  '{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 1.0}}}}'
 ```
 
-通过 `rostopic pub`（ROS 1）可向底盘发送控制指令：
-
-```bash
-# VEL 模式 — 旋转 0.3 m/s
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}}}"
-
-# MIT 模式 — 阻尼运动（目标速度 0.5 rad/s，阻尼 3.0，kp 当前固件强制为 0）
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0.0, 0.0, 0.0], vel: [0.5, 0.5, 0.5], eff: [0.0, 0.0, 0.0], kp: [0.0, 0.0, 0.0], kd: [3.0, 3.0, 3.0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
-
-# MIT 模式 — 松手（全零，无输出力矩）
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0, 0, 0], vel: [0, 0, 0], eff: [0, 0, 0], kp: [0, 0, 0], kd: [0, 0, 0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
+```shell
+# Clear the retained chassis command
+ros2 topic pub --once /chs_ctrl \
+  hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
+  '{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 0}}'
 ```
 
-> A3 H1 的 MIT 为真阻抗控制（`set_chs_mit_cmd`），字段与 Maver 一致：`pos` 目标位置、`vel` 目标速度、`kp` 位置刚度、`kd` 阻尼；当前固件强制 `kp=0`。
+### 5. 自定义 Bridge 话题
 
-#### Maver 快速使用
+在参数文件中修改：
 
-通过 `ros2 topic pub` 可快速向底盘发送控制指令（8 个电机按 `joint_wheel1, joint_yaw1, ..., joint_wheel4, joint_yaw4` 顺序排列）：
-
-```bash
-# VEL 模式 — 前进 0.3 m/s
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.3, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
-
-# VEL 模式 — 原地旋转 0.5 rad/s
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.5}}}}'
-
-# MIT 模式 — 阻尼运动（目标速度 0.5 rad/s，阻尼 3.0，kp 当前固件强制为 0）
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vel: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], eff: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], kp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], kd: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
-
-# MIT 模式 — 松手（全零，无输出力矩）
-ros2 topic pub --once /chs_ctrl hex_ros_msgs/msg/HexRosRoboChsCtrlStamped \
-'{header: {stamp: {sec: 0, nanosec: 0}, frame_id: "base_link"}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0, 0, 0, 0, 0, 0, 0, 0], vel: [0, 0, 0, 0, 0, 0, 0, 0], eff: [0, 0, 0, 0, 0, 0, 0, 0], kp: [0, 0, 0, 0, 0, 0, 0, 0], kd: [0, 0, 0, 0, 0, 0, 0, 0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}'
+```yaml
+joint_state_topic: "/my_isaac_joint_states"
+joint_command_topic: "/my_isaac_joint_command"
 ```
 
-通过 `rostopic pub`（ROS 1）可向底盘发送控制指令：
+启动节点时使用该参数文件。Isaac Sim Bridge 侧也必须使用相同的话题名称。
 
-```bash
-# VEL 模式 — 旋转 0.3 m/s
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 2, jnt: {pos: [], vel: [], eff: [], kp: [], kd: [], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.3}}}}"
+---
 
-# MIT 模式 — 阻尼运动（目标速度 0.5 rad/s，阻尼 3.0，kp 当前固件强制为 0）
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], vel: [0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5, 0.5], eff: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], kp: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0], kd: [3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0, 3.0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
+## 9. 常见问题
 
-# MIT 模式 — 松手（全零，无输出力矩）
-rostopic pub --once /chs_ctrl hex_ros_msgs/HexRosRoboChsCtrlStamped "{header: {stamp: 0, frame_id: 'base_link'}, chs_ctrl: {ctrl_mode: 1, jnt: {pos: [0, 0, 0, 0, 0, 0, 0, 0], vel: [0, 0, 0, 0, 0, 0, 0, 0], eff: [0, 0, 0, 0, 0, 0, 0, 0], kp: [0, 0, 0, 0, 0, 0, 0, 0], kd: [0, 0, 0, 0, 0, 0, 0, 0], lim_vel: [], lim_acc: []}, vel: {linear: {x: 0.0, y: 0.0, z: 0.0}, angular: {x: 0.0, y: 0.0, z: 0.0}}}}"
+### 没有收到 `/joint_states`
+
+检查：
+
+```shell
+ros2 topic info /joint_states -v
+ros2 topic echo /joint_states --once
 ```
 
-MIT 模式字段说明：
+如果没有实际消息，请检查 Isaac Sim ROS 2 Bridge 是否已启用，以及 ROS domain、RMW、DDS discovery 和 Docker 网络是否一致。
 
-| `chs_ctrl.jnt` 字段 | 含义 | 单位 |
-|------|------|------|
-| `jnt.pos[0..7]` | 目标位置 | rad |
-| `jnt.vel[0..7]` | 目标速度 | rad/s |
-| `jnt.kp[0..7]` | 位置刚度 | Nm/rad |
-| `jnt.kd[0..7]` | 阻尼 | Nm/(rad/s) |
+### MIT 被拒绝
 
-> `--once` 发布一次只在单个控制周期内生效；如需持续运动请使用 `--rate` 定期发布。
-> `robot_type` 机型选择见上文「4. 使用包」（30=X4H1 / 31=L4H1）。
-> 8 个电机的数组顺序为 `joint_wheel1, joint_yaw1, joint_wheel2, joint_yaw2, joint_wheel3, joint_yaw3, joint_wheel4, joint_yaw4`（索引 0, 2, 4, 6 = wheel 驱动，1, 3, 5, 7 = yaw 转向）。
+这是当前设计。Isaac Sim chassis 节点只支持：
+
+```text
+VEL：底盘速度控制
+NONE：空模式，清除当前保留指令
+```
+
+收到 MIT 后会输出 warning，并且不会发布该控制命令。
+
+### `NONE` 的含义
+
+`NONE` 是空模式。它用于清除当前保留控制指令，不是一次新的零速度 `VEL` 指令。
+
+### `/joint_command` 没有消息
+
+检查：
+
+```shell
+ros2 topic info /joint_command -v
+ros2 topic echo /joint_command --once
+```
+
+Maver 节点还需要有效的 `joint_state_topic` 状态。检查状态话题中的八个关节名称是否完整，并确认参数中的命令话题与 Isaac Sim Bridge 订阅话题一致。
+
+### ROS 2 跨容器无法通信
+
+确认两端配置一致：
+
+```text
+ROS_DOMAIN_ID
+RMW_IMPLEMENTATION
+DDS discovery
+Docker network
+```
+
+跨容器通信时不要使用只允许本机回环接口的配置。
