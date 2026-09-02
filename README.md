@@ -181,6 +181,12 @@ The Isaac Sim side must enable the ROS 2 Bridge and provide `JointState` state p
 
 - [Isaac Sim ROS 2 Installation](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_ros.html)
 
+The Isaac Sim scene also requires the corresponding USD assets. Clone the USD asset repository and configure the asset path according to its documentation:
+
+```shell
+git clone https://github.com/hexfellow/hex_isaac_usd.git
+```
+
 ---
 
 ## 7. Isaac Sim Action Graph
@@ -205,7 +211,7 @@ colcon build --symlink-install
 source install/setup.bash --extend
 ```
 
-### 2. Start a Node
+### 2. Start Node
 
 Start Maver X4:
 

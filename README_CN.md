@@ -9,8 +9,9 @@
 - [4. 控制模式](#4-控制模式)
 - [5. 参数说明](#5-参数说明)
 - [6. 依赖关系](#6-依赖关系)
-- [7. 快速使用](#7-快速使用)
-- [8. 常见问题](#8-常见问题)
+- [7. Isaacsim Action Graph](#7-isaacsim-action-graph)
+- [8. 快速使用](#8-快速使用)
+- [9. 常见问题](#9-常见问题)
 
 ---
 
@@ -181,11 +182,19 @@ Isaac Sim 侧需要启用 ROS 2 Bridge，并创建与本包参数一致的 `Join
 
 - [Isaac Sim ROS 2 Installation](https://docs.isaacsim.omniverse.nvidia.com/latest/installation/install_ros.html)
 
+Isaac Sim 场景还需要对应的 USD 资源。请获取以下 USD 资源仓库，并按照仓库说明配置资产路径：
+
+```shell
+git clone https://github.com/hexfellow/hex_isaac_usd.git
+```
+
 ---
 
 ## 7. Isaacsim Action Graph
+
 ![Action Graph](./img/80d5a0cb2d9ced03a2dc84bb76663a84.png)
 
+---
 
 ## 8. 快速使用
 
