@@ -1,269 +1,163 @@
 #!/usr/bin/env python3
 # -*- coding:utf-8 -*-
 ################################################################
-# Copyright 2024 Dong Zhaorui. All rights reserved.
-# Author: Dong Zhaorui 847235539@qq.com
-# Date  : 2024-09-05
+# Copyright 2026 Dong Zhaorui. All rights reserved.
+# Author: taigong26 thetaigon@qq.com
+# Date  : 2026-08-31
 ################################################################
-# bridge-forwarding adaptation: the deliverable never talks to hardware.
-#   * subscribes to the bridge joint_states (sensor_msgs/JointState)
-#   * publishes the single torque command to the bridge cmd topic
-#   * forwards bridge state as chs_state (odom left empty this phase)
-# All bridge topics the deliverable subscribes to are exposed as params.
+"""Provide the ROS 2 interface for the Isaac Sim Maver X4 bridge."""
 
-import numpy as np
 import threading
 
-from hex_util_runtime import ns_now
-
+import numpy as np
 import rclpy
 import rclpy.node
-
-from builtin_interfaces.msg import Time
 from sensor_msgs.msg import JointState
-from hex_ros_msgs.msg import (
-    HexRosJnt,
-    HexRosRoboChsStateStamped,
-    HexRosRoboChsCtrlStamped,
-)
+from hex_ros_msgs.msg import HexRosJnt, HexRosRoboChsCtrlStamped
 
 from hex_util_msg.dataclass.dataclass_base import (
-    HexDcBaseHeader,
-    HexDcBaseTime,
-    HexDcBaseVector3,
-    HexDcBaseJntFull,
-    HexDcBaseTwist,
+    HexDcBaseHeader, HexDcBaseJntFull, HexDcBaseTwist, HexDcBaseVector3,
 )
 from hex_util_msg.dataclass.dataclass_robo import (
-    HexDcRoboChsCtrl,
-    HexDcRoboChsCtrlMode,
-    HexDcRoboChsCtrlStamped,
-    HexDcRoboChsStateStamped,
+    HexDcRoboChsCtrl, HexDcRoboChsCtrlMode, HexDcRoboChsCtrlStamped,
 )
-
 from .interface_base import ChassisInterfaceBase
-
-from rclpy.logging import LoggingSeverity
 
 
 class DataInterface(ChassisInterfaceBase):
+    """Provide ROS 2 transport services for the Maver X4 bridge.
 
-    def __init__(self, name: str = "unknown"):
+    ROS callbacks run in a dedicated spin thread.  The chassis node reads
+    control commands and cached joint positions from its control thread.
+    """
+
+    def __init__(self, name: str = "unknown") -> None:
+        """Initialize ROS 2 publishers, subscribers, and the spin thread.
+
+        Args:
+            name: ROS 2 node name.
+
+        """
         rclpy.init()
-        self.__node = rclpy.node.Node(name)
-        self.__logger = self.__node.get_logger()
-        # self.__logger.set_level(LoggingSeverity.DEBUG)
+        self.__node = rclpy.node.Node(
+            name, automatically_declare_parameters_from_overrides=True)
+        self._logger = self.__node.get_logger()
+        # Prevent repeated shutdown calls from destroying ROS resources twice.
         self._shutting_down = False
-        self.__spin_thread = threading.Thread(target=self.__spin)
-        self.__spin_thread.start()
-
         super().__init__(name)
 
-        ### rate parameters
-        self.__node.declare_parameter('ctrl_rate', 1000.0)
-        self.__node.declare_parameter('rate_state', 500.0)
-        self._rate_param["ros"] = self.__node.get_parameter('ctrl_rate').value
-        self._rate_param["state"] = self.__node.get_parameter('rate_state').value
+        self._rate_param["ros"] = float(
+            self.__node.get_parameter("ctrl_rate").value)
         self.__rate = self.__node.create_rate(self._rate_param["ros"])
 
-        ### robot parameters
-        self.__node.declare_parameter('robot_frame_id', "base_link")
-        self.__node.declare_parameter('robot_type', 30)
-        self._robot_param = {
-            "frame_id": self.__node.get_parameter('robot_frame_id').value,
-            "robot_type": int(self.__node.get_parameter('robot_type').value),
-        }
-
-        ### bridge parameters (all bridge topics we subscribe to are params)
-        self.__node.declare_parameter('bridge_state_topic', '/joint_states')
-        self.__node.declare_parameter('bridge_cmd_topic', '/hex_chs_cmd')
-        self.__node.declare_parameter('time_source', 'sim')
-        self._bridge_param = {
-            "state_topic": self.__node.get_parameter('bridge_state_topic').value,
-            "cmd_topic": self.__node.get_parameter('bridge_cmd_topic').value,
-            "time_source": self.__node.get_parameter('time_source').value,
-        }
-
-        ### publisher — chs_state
-        self.__chs_state_pub = self.__node.create_publisher(
-            HexRosRoboChsStateStamped,
-            'chs_state',
-            10,
-        )
-        ### publisher — bridge torque command (sensor_msgs/JointState, effort)
-        self.__bridge_cmd_pub = self.__node.create_publisher(
+        self.__command_pub = self.__node.create_publisher(
             JointState,
-            self._bridge_param["cmd_topic"],
-            10,
-        )
-
-        ### subscriber — chs_ctrl
-        self.__chs_ctrl_sub = self.__node.create_subscription(
+            self.__node.get_parameter("joint_command_topic").value,
+            10)
+        self.__ctrl_sub = self.__node.create_subscription(
             HexRosRoboChsCtrlStamped,
-            'chs_ctrl',
-            self.__chs_ctrl_callback,
-            10,
-        )
-        self.__chs_ctrl_sub
-        ### subscriber — bridge joint_states
-        self.__bridge_state_sub = self.__node.create_subscription(
+            "chs_ctrl",
+            self.__ctrl_callback,
+            10)
+        self.__joint_state_sub = self.__node.create_subscription(
             JointState,
-            self._bridge_param["state_topic"],
-            self.__bridge_state_callback,
-            10,
-        )
-        self.__bridge_state_sub
+            self.__node.get_parameter("joint_state_topic").value,
+            self.__joint_state_callback,
+            10)
 
-    def sleep(self):
+        self.__spin_thread = threading.Thread(
+            target=self.__spin, daemon=True)
+        self.__spin_thread.start()
+
+    def sleep(self) -> None:
+        """Sleep for one configured control period."""
         self.__rate.sleep()
 
-    ####################
-    ### ros infrastructure
-    ####################
     def ok(self) -> bool:
+        """Return whether the ROS 2 context is still active.
+
+        Returns:
+            ``True`` while the ROS 2 context is running.
+
+        """
         return rclpy.ok()
 
-    def shutdown(self):
+    def shutdown(self) -> None:
+        """Destroy ROS resources and stop the spin thread."""
         if self._shutting_down:
             return
         self._shutting_down = True
-        try:
-            self.__node.destroy_node()
-        except Exception:
-            pass
-        try:
+        self.__node.destroy_node()
+        if rclpy.ok():
             rclpy.shutdown()
-        except Exception:
-            pass
-        self.__spin_thread.join()
+        self.__spin_thread.join(timeout=1.0)
 
-    def __spin(self):
+    def __spin(self) -> None:
+        """Process ROS callbacks until the context is shut down."""
         try:
             rclpy.spin(self.__node)
         except rclpy.executors.ExternalShutdownException:
             pass
+        except Exception:
+            if not self._shutting_down:
+                raise
 
-    ####################
-    ### logging
-    ####################
-    def logd(self, msg, *args, **kwargs):
-        self.__logger.debug(msg, *args, **kwargs)
+    def logi(self, msg, *args, **kwargs) -> None:
+        """Write an informational log."""
+        self._logger.info(msg, *args, **kwargs)
 
-    def logi(self, msg, *args, **kwargs):
-        self.__logger.info(msg, *args, **kwargs)
+    def logw(self, msg, *args, **kwargs) -> None:
+        """Write a warning log."""
+        self._logger.warning(msg, *args, **kwargs)
 
-    def logw(self, msg, *args, **kwargs):
-        self.__logger.warning(msg, *args, **kwargs)
+    def loge(self, msg, *args, **kwargs) -> None:
+        """Write an error log."""
+        self._logger.error(msg, *args, **kwargs)
 
-    def loge(self, msg, *args, **kwargs):
-        self.__logger.error(msg, *args, **kwargs)
+    def logd(self, msg, *args, **kwargs) -> None:
+        """Write a debug log."""
+        self._logger.debug(msg, *args, **kwargs)
 
-    def logf(self, msg, *args, **kwargs):
-        self.__logger.fatal(msg, *args, **kwargs)
+    def pub_joint_command(self, names, velocity, effort, position=None) -> None:
+        """Publish canonical joint targets in the current Bridge order.
 
-    ####################
-    ### time source
-    ####################
-    def now_ns(self) -> int:
-        return ns_now()
+        Args:
+            names: Bridge joint names defining the output order.
+            velocity: Eight canonical joint velocity targets.
+            effort: Eight canonical effort feed-forward values.
+            position: Optional eight canonical joint position targets.
 
-    def now_stamp(self) -> HexDcBaseTime:
-        now = self.__node.get_clock().now()
-        secs, nsecs = now.seconds_nanoseconds()
-        return HexDcBaseTime(secs=secs, nsecs=nsecs)
+        """
+        bridge_velocity = self.to_bridge_order(velocity, names)
+        bridge_effort = self.to_bridge_order(effort, names)
+        bridge_position = (self.to_bridge_order(position, names)
+                           if position is not None else None)
+        if (bridge_velocity is None or bridge_effort is None
+                or (position is not None and bridge_position is None)):
+            self.logw("Maver command mapping is unavailable; command dropped")
+            return
 
-    ####################
-    ### publishers
-    ####################
-    def pub_chs_state(self, out: HexDcRoboChsStateStamped):
-        msg = HexRosRoboChsStateStamped()
-        # forward stamp: sim (bridge) or ros (now) per time_source param
-        forward_stamp_dc = self.get_forward_stamp()
-        msg.header.stamp = Time(
-            sec=int(forward_stamp_dc.secs),
-            nanosec=int(forward_stamp_dc.nsecs),
-        )
-        msg.header.frame_id = out.header.frame_id
-
-        jnt = out.chs_state.jnt
-        msg.chs_state.jnt.header.stamp = Time(
-            sec=int(forward_stamp_dc.secs),
-            nanosec=int(forward_stamp_dc.nsecs),
-        )
-        msg.chs_state.jnt.header.frame_id = out.header.frame_id
-        msg.chs_state.jnt.name = self._joint_names
-        msg.chs_state.jnt.position = \
-            np.asarray(jnt.position, dtype=np.float64).tolist()
-        msg.chs_state.jnt.velocity = \
-            np.asarray(jnt.velocity, dtype=np.float64).tolist()
-        msg.chs_state.jnt.effort = \
-            np.asarray(jnt.effort, dtype=np.float64).tolist()
-
-        # odom is left empty this phase (default zeros)
-
-        self.__chs_state_pub.publish(msg)
-
-    def pub_bridge_cmd(self, names: list, effort: np.ndarray):
+        # Publish arrays only after all three fields share one name mapping.
         msg = JointState()
-        forward_stamp = self.get_forward_stamp()
-        msg.header.stamp = Time(
-            sec=int(forward_stamp.secs),
-            nanosec=int(forward_stamp.nsecs),
-        )
-        msg.name = names
-        msg.effort = np.asarray(effort, dtype=np.float64).tolist()
-        self.__bridge_cmd_pub.publish(msg)
-
-    ####################
-    ### subscribers
-    ####################
-    def __bridge_state_callback(self, msg: JointState):
-        stamp = HexDcBaseTime(
-            secs=int(msg.header.stamp.sec),
-            nsecs=int(msg.header.stamp.nanosec),
-        )
-        self.set_bridge_state(
-            msg.name, msg.position, msg.velocity, msg.effort, stamp)
-
-    def __chs_ctrl_callback(self, msg: HexRosRoboChsCtrlStamped):
-        self._chs_ctrl_deque.append(self.__chs_ctrl_msg_to_dc(msg))
-
-    @staticmethod
-    def __chs_ctrl_msg_to_dc(
-            msg: HexRosRoboChsCtrlStamped) -> HexDcRoboChsCtrlStamped:
-        header = HexDcBaseHeader(
-            stamp=HexDcBaseTime(
-                secs=int(msg.header.stamp.sec),
-                nsecs=int(msg.header.stamp.nanosec),
-            ),
-            frame_id=msg.header.frame_id,
-        )
-
-        chs_msg = msg.chs_ctrl
-        chs_ctrl = HexDcRoboChsCtrl(
-            ctrl_mode=HexDcRoboChsCtrlMode(int(chs_msg.ctrl_mode)),
-            jnt=DataInterface.__jnt_to_dc(chs_msg.jnt),
-            vel=HexDcBaseTwist(
-                linear=HexDcBaseVector3(
-                    x=chs_msg.vel.linear.x,
-                    y=chs_msg.vel.linear.y,
-                    z=chs_msg.vel.linear.z,
-                ),
-                angular=HexDcBaseVector3(
-                    x=chs_msg.vel.angular.x,
-                    y=chs_msg.vel.angular.y,
-                    z=chs_msg.vel.angular.z,
-                ),
-            ),
-        )
-
-        return HexDcRoboChsCtrlStamped(
-            header=header,
-            chs_ctrl=chs_ctrl,
-        )
+        msg.header.stamp = self.__node.get_clock().now().to_msg()
+        msg.name = list(names)
+        msg.velocity = bridge_velocity.tolist()
+        msg.effort = bridge_effort.tolist()
+        if bridge_position is not None:
+            msg.position = bridge_position.tolist()
+        self.__command_pub.publish(msg)
 
     @staticmethod
     def __jnt_to_dc(jnt: HexRosJnt) -> HexDcBaseJntFull:
+        """Convert a ROS joint command into the shared dataclass.
+
+        Args:
+            jnt: ROS joint command fields.
+
+        Returns:
+            A NumPy-backed shared joint-command structure.
+
+        """
         return HexDcBaseJntFull(
             pos=np.asarray(jnt.pos, dtype=np.float64),
             vel=np.asarray(jnt.vel, dtype=np.float64),
@@ -271,5 +165,37 @@ class DataInterface(ChassisInterfaceBase):
             kp=np.asarray(jnt.kp, dtype=np.float64),
             kd=np.asarray(jnt.kd, dtype=np.float64),
             lim_vel=np.asarray(jnt.lim_vel, dtype=np.float64),
-            lim_acc=np.asarray(jnt.lim_acc, dtype=np.float64),
-        )
+            lim_acc=np.asarray(jnt.lim_acc, dtype=np.float64))
+
+    def __ctrl_callback(self, msg: HexRosRoboChsCtrlStamped) -> None:
+        """Convert and queue an incoming chassis command.
+
+        Args:
+            msg: ROS 2 chassis control message.
+
+        """
+        ctrl = msg.chs_ctrl
+        self.logd(f"received chassis control: {ctrl.ctrl_mode}")
+        self._chs_ctrl_deque.append(HexDcRoboChsCtrlStamped(
+            header=HexDcBaseHeader(frame_id=msg.header.frame_id),
+            chs_ctrl=HexDcRoboChsCtrl(
+                ctrl_mode=HexDcRoboChsCtrlMode(int(ctrl.ctrl_mode)),
+                jnt=self.__jnt_to_dc(ctrl.jnt),
+                vel=HexDcBaseTwist(
+                    linear=HexDcBaseVector3(
+                        x=ctrl.vel.linear.x,
+                        y=ctrl.vel.linear.y,
+                        z=ctrl.vel.linear.z),
+                    angular=HexDcBaseVector3(
+                        x=ctrl.vel.angular.x,
+                        y=ctrl.vel.angular.y,
+                        z=ctrl.vel.angular.z)))))
+
+    def __joint_state_callback(self, msg: JointState) -> None:
+        """Cache the latest Bridge joint names and positions.
+
+        Args:
+            msg: Joint state message published by Isaac Sim.
+
+        """
+        self.set_joint_state(msg.name, msg.position)

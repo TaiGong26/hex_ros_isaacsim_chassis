@@ -1,17 +1,8 @@
 /**/hex_ros_isaacsim_trigger_a3:
   ros__parameters:
-    # main loop rate [hz] — torque publish rate to the bridge
+    # Fixed command forwarding rate in Hz.
     ctrl_rate: 1000.0
-
-    # chs_state forward rate [hz]
-    rate_state: 500.0
-
-    # frame id used in the forwarded state header
-    robot_frame_id: "base_link"
-
-    # bridge topics (all bridge topics the deliverable subscribes to are params)
-    bridge_state_topic: "/joint_states"
-    bridge_cmd_topic: "/hex_chs_cmd"
-
-    # forwarded header time source: "sim" (bridge stamp) | "ros" (now)
-    time_source: "sim"
+    # Isaac Sim publishes /clock; the node follows simulation time.
+    use_sim_time: true
+    joint_command_topic: "/joint_command"
+    joint_state_topic: "/joint_states"

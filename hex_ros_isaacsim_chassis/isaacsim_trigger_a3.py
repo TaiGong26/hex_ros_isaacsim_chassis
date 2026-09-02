@@ -2,231 +2,140 @@
 # -*- coding:utf-8 -*-
 ################################################################
 # Copyright 2026 Dong Zhaorui. All rights reserved.
-# Author: Dong Zhaorui 847235539@qq.com
-# Date  : 2026-08-10
+# Author: taigong26 thetaigon@qq.com
+# Date  : 2026-08-31
 ################################################################
-# Isaac Sim bridge-forwarding chassis node (Trigger A3).
-#
-# Subscribes to chs_ctrl (hex_ros_msgs), computes the chassis torque locally
-# mirroring hex_ros_sim_trigger_a/mujoco_sim.py, publishes the single torque to
-# the bridge cmd topic, and forwards the bridge joint_states as chs_state
-# (odom left empty this phase).
-#
-# Joint order (ROS canonical): joint_1, joint_2, joint_3 — same order as the
-# bridge joint_states (dynamic from the sim).
+"""Forward Trigger A3 controls to the Isaac Sim implicit PD controller."""
 
 import os
 import sys
 
 import numpy as np
 
-scrpit_path = os.path.abspath(os.path.dirname(__file__))
-if scrpit_path not in sys.path:
-    sys.path.append(scrpit_path)
+script_path = os.path.abspath(os.path.dirname(__file__))
+if script_path not in sys.path:
+    sys.path.append(script_path)
+
 from utility import DataInterface
-
-from hex_util_ros import angle_norm, HexFricUtil
-
-from hex_util_msg.dataclass.dataclass_robo import (
-    HexDcRoboChsCtrl,
-    HexDcRoboChsCtrlMode,
-    HexDcRoboChsCtrlStamped,
-    HexDcRoboChsState,
-    HexDcRoboChsStateStamped,
-)
-from hex_util_msg.dataclass.dataclass_base import (
-    HexDcBaseHeader,
-    HexDcBaseTime,
-    HexDcBaseJntState,
-    HexDcBaseJntFull,
-    HexDcBaseVector3,
-    HexDcBaseTwist,
-)
+from hex_util_msg.dataclass.dataclass_robo import HexDcRoboChsCtrlMode
 
 
-# Trigger A3 H1 3-motor canonical joint names (fallback before the bridge
-# joint_states arrives)
-JOINT_STATE_NAME = ["joint_1", "joint_2", "joint_3"]
-
-CHS_DOF = len(JOINT_STATE_NAME)
-
-# Default gains used to seed the initial MIT command (mirrors mujoco_sim.py)
-CHS_KP_DEFAULT = np.array([20.0] * CHS_DOF)
-CHS_KD_DEFAULT = np.array([1.0] * CHS_DOF)
-
-# VEL mode kinematics: fixed 3x3 inverse jacobian (mirrors mujoco_sim.py)
-CHS_PARAMS = {
-    "wheel_radius": 0.102,
-    "wheel_distance": 0.3252,
-}
+CHS_DOF = 3
+JOINT_NAME = [f"joint_{i}" for i in range(1, CHS_DOF + 1)]
 
 
 class IsaacsimTriggerA3:
+    """Convert Trigger A3 controls into Bridge joint commands."""
 
-    def __init__(self):
-        ### utility
+    def __init__(self) -> None:
+        """Initialize the Trigger A3 transport and kinematic state."""
         self.__data_interface = DataInterface("hex_ros_isaacsim_trigger_a3")
 
-        ### parameters
         rate_param = self.__data_interface.get_rate_param()
-        robot_param = self.__data_interface.get_robot_param()
         self.__data_interface.logi(f"ctrl_rate: {rate_param['ros']} hz")
-        self.__data_interface.logi(f"rate_state: {rate_param['state']} hz")
-        self.__data_interface.logi(
-            f"robot_frame_id: {robot_param['frame_id']}")
 
-        ### joint names (dynamic from the bridge, canonical fallback)
-        self.__data_interface.set_dofs(CHS_DOF, JOINT_STATE_NAME)
-
-        ### friction compensation (mirrors mujoco_sim.py)
-        self.__fric_util = HexFricUtil(
-            fc=np.array([0.05] * CHS_DOF),
-            fv=np.array([0.0015] * CHS_DOF),
-            fo=np.array([0.0] * CHS_DOF),
-            k=np.array([100.0] * CHS_DOF),
-        )
-
-        ### VEL mode kinematics: fixed 3x3 inverse jacobian
-        beta = np.array([np.pi / 3, -np.pi / 3, np.pi])
+        self.__chs_params = {
+            "wheel_radius": 0.102,
+            "wheel_distance": 0.3252,
+        }
+        beta = np.array([np.pi / 3,np.pi , -np.pi / 3])
         s, c = np.sin(beta), np.cos(beta)
-        wd = CHS_PARAMS["wheel_distance"]
-        wr_inv = 1.0 / CHS_PARAMS["wheel_radius"]
-        self.__jac_inv = -wr_inv * np.array([
-            [-s[0], c[0], wd],
-            [-s[1], c[1], wd],
-            [-s[2], c[2], wd],
+        self.__jac_inv = -1.0 / self.__chs_params["wheel_radius"] * np.array([
+            [-s[0], c[0], self.__chs_params["wheel_distance"]],
+            [-s[1], c[1], self.__chs_params["wheel_distance"]],
+            [-s[2], c[2], self.__chs_params["wheel_distance"]],
         ])
+        
+        # Keep the newest accepted chassis command for repeated control cycles.
+        self.__cur_ctrl = None
+        # Limit the missing-control warning to one message per node lifetime.
+        self.__control_warning_sent = False
 
-        ### derived
-        self.__state_decim = max(
-            1,
-            int(round(rate_param["ros"] / rate_param["state"])),
-        )
-        self.__robot_frame_id = robot_param["frame_id"]
+    @staticmethod
+    def __array(values, default: float = 0.0) -> np.ndarray:
+        """Return a three-joint array or a uniform default.
 
-        ### initial seed ctrl: MIT hold (mirrors the sim)
-        self.__cur_ctrl = HexDcRoboChsCtrlStamped(
-            header=HexDcBaseHeader(
-                stamp=self.__data_interface.now_stamp(),
-                frame_id=self.__robot_frame_id,
-            ),
-            chs_ctrl=HexDcRoboChsCtrl(
-                ctrl_mode=HexDcRoboChsCtrlMode.MIT,
-                jnt=HexDcBaseJntFull(
-                    pos=np.zeros(CHS_DOF),
-                    vel=np.zeros(CHS_DOF),
-                    eff=np.zeros(CHS_DOF),
-                    kp=CHS_KP_DEFAULT.copy(),
-                    kd=CHS_KD_DEFAULT.copy(),
-                    lim_vel=np.zeros(CHS_DOF),
-                    lim_acc=np.zeros(CHS_DOF),
-                ),
-                vel=HexDcBaseTwist(
-                    linear=HexDcBaseVector3(x=0.0, y=0.0, z=0.0),
-                    angular=HexDcBaseVector3(x=0.0, y=0.0, z=0.0),
-                ),
-            ),
-        )
+        Args:
+            values: Input sequence to validate.
+            default: Value used when the input does not contain three items.
 
-    ####################
-    ### torque computation (mirrors mujoco_sim.py)
-    ####################
-    def __motor_cmd(self, ctrl_vel) -> np.ndarray:
-        """motor = jac_inv @ [vx, vy, omega]."""
-        cmd = np.array(
-            [ctrl_vel.linear.x, ctrl_vel.linear.y, ctrl_vel.angular.z])
-        return self.__jac_inv @ cmd
+        Returns:
+            A floating-point array with exactly three elements.
 
-    def __apply_chs_ctrl(
-        self,
-        ctrl: HexDcRoboChsCtrlStamped,
-        cur_pos: np.ndarray,
-        cur_vel: np.ndarray,
-    ) -> np.ndarray:
+        """
+        array = np.asarray(values, dtype=np.float64)
+        if array.size == CHS_DOF:
+            return array
+        return np.full(CHS_DOF, default, dtype=np.float64)
+
+    def __apply_chs_ctrl(self, ctrl):
+        """Convert one A3 chassis command into joint targets.
+
+        Args:
+            ctrl: Chassis control message in the shared dataclass format.
+
+        Returns:
+            A tuple of velocity and effort arrays, or ``None`` for an
+            unsupported control mode.
+
+        """
         chs_ctrl = ctrl.chs_ctrl
-        mode = chs_ctrl.ctrl_mode
-        jnt = chs_ctrl.jnt
-        comp = self.__fric_util(cur_vel)
-
-        if mode == HexDcRoboChsCtrlMode.MIT:
-            err_pos = angle_norm(jnt.pos - cur_pos)
-            err_vel = jnt.vel - cur_vel
-            tau_cmds = jnt.kp * err_pos + jnt.kd * err_vel + jnt.eff + comp
-
-        elif mode == HexDcRoboChsCtrlMode.VEL:
-            motor_vel = self.__motor_cmd(chs_ctrl.vel)
-            tau_cmds = jnt.kd * (motor_vel - cur_vel) + jnt.eff + comp
-
+        if chs_ctrl.ctrl_mode == HexDcRoboChsCtrlMode.VEL:
+            # VEL mode maps the requested body twist through the fixed A3 IK.
+            twist = np.array([
+                chs_ctrl.vel.linear.x,
+                chs_ctrl.vel.linear.y,
+                chs_ctrl.vel.angular.z])
+            velocity = self.__jac_inv @ twist
+            effort = self.__array(chs_ctrl.jnt.eff)
+        elif chs_ctrl.ctrl_mode == HexDcRoboChsCtrlMode.MIT:
+            self.__data_interface.logw(
+                "Trigger A3 MIT control is not supported; use VEL mode")
+            return None
         else:
-            raise ValueError(f"Unsupported chassis control mode: {mode}")
+            return None
 
-        return tau_cmds
+        return velocity, effort
 
-    ####################
-    ### state forwarding
-    ####################
-    def __build_chs_state(
-        self,
-        cur_pos: np.ndarray,
-        cur_vel: np.ndarray,
-        cur_eff: np.ndarray,
-    ) -> HexDcRoboChsStateStamped:
-        """Build chs_state from the bridge state (odom left empty)."""
-        return HexDcRoboChsStateStamped(
-            header=HexDcBaseHeader(
-                stamp=self.__data_interface.now_stamp(),
-                frame_id=self.__robot_frame_id,
-            ),
-            chs_state=HexDcRoboChsState(
-                jnt=HexDcBaseJntState(
-                    position=cur_pos,
-                    velocity=cur_vel,
-                    effort=cur_eff,
-                ),
-                # odom is left empty this phase
-            ),
-        )
-
-    def run(self):
-        state_count = 0
+    def run(self) -> None:
+        """Run the fixed-rate A3 command-forwarding loop."""
         while self.__data_interface.ok():
-            # 1. drain to the latest control frame
             ctrl = self.__data_interface.get_chs_ctrl(latest=True)
             if ctrl is not None:
-                self.__cur_ctrl = ctrl
+                # NONE clears the retained command; other modes replace it.
+                if ctrl.chs_ctrl.ctrl_mode == HexDcRoboChsCtrlMode.NONE:
+                    self.__cur_ctrl = None
+                else:
+                    self.__cur_ctrl = ctrl
 
-            # 2. compute the single torque from the latest bridge state and
-            #    publish it to the bridge cmd topic at ctrl_rate
-            cur_pos, cur_vel, cur_eff = self.__data_interface.get_chs_state()
-            tau_cmds = self.__apply_chs_ctrl(self.__cur_ctrl, cur_pos, cur_vel)
-            self.__data_interface.pub_bridge_cmd(
-                self.__data_interface.get_joint_names(), tau_cmds)
-
-            # 3. forward bridge state as chs_state at rate_state
-            state_count += 1
-            if state_count >= self.__state_decim:
-                state_count = 0
-                chs_state = self.__build_chs_state(cur_pos, cur_vel, cur_eff)
-                self.__data_interface.pub_chs_state(chs_state)
-
+            if self.__cur_ctrl is not None:
+                command = self.__apply_chs_ctrl(self.__cur_ctrl)
+                if command is not None:
+                    self.__data_interface.pub_joint_command(JOINT_NAME, *command)
+                else:
+                    self.__data_interface.logw(
+                        "A3 control was rejected; no command published")
+            elif not self.__control_warning_sent:
+                self.__data_interface.logw(
+                    "A3 chs_ctrl not received; command forwarding is idle")
+                self.__control_warning_sent = True
             self.__data_interface.sleep()
 
-    def shutdown(self):
-        try:
-            self.__data_interface.shutdown()
-        except Exception:
-            pass
+    def shutdown(self) -> None:
+        """Stop the ROS interface and release its resources."""
+        self.__data_interface.shutdown()
 
 
-def main():
-    isaacsim_trigger = IsaacsimTriggerA3()
+def main() -> None:
+    """Create and run the Trigger A3 Bridge forwarder."""
+    robot_trigger_a3 = IsaacsimTriggerA3()
     try:
-        isaacsim_trigger.run()
+        robot_trigger_a3.run()
     except KeyboardInterrupt:
         pass
     finally:
-        isaacsim_trigger.shutdown()
+        robot_trigger_a3.shutdown()
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
